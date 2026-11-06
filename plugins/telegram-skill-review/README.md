@@ -104,13 +104,13 @@ The pending JSON record stores delivery progress. The scanner resumes after a ga
 ## Tests
 
 ```bash
-uv run --with pytest --python 3.12 pytest tests/test_review.py -q
+uv run --with pytest pytest tests/test_review.py -q
 ```
 
 From the repository root:
 
 ```bash
-uv run --with pytest --python 3.12 pytest telegram-skill-review/tests/test_review.py -q
+uv run pytest plugins/telegram-skill-review/tests/test_review.py -q
 ```
 
 ## Security properties
