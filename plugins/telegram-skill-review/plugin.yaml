@@ -1,0 +1,37 @@
+name: telegram-skill-review
+version: "0.1.0"
+author: "ZequnZ"
+manifest_version: 2
+api_version: 1
+requires_hermes: ">=0.21.6"
+description: >-
+  Sends autonomous pending skill writes to Telegram topics as Rich Messages
+  and applies Approve or Reject button decisions without an LLM call.
+license: MIT
+tags: [telegram, skills-approval]
+config_schema:
+  chat_id:
+    type: str
+    default: ""
+    label: Telegram chat ID
+    description: Private Telegram chat with Threaded Mode enabled. Falls back to TELEGRAM_HOME_CHANNEL.
+  source_profiles:
+    type: list
+    default: []
+    label: Source profiles
+    description: Existing profiles whose pending skill writes this bot reviews and may approve. Empty means the plugin's own profile.
+  include_foreground:
+    type: bool
+    default: false
+    label: Review foreground writes
+    description: Also send user-requested foreground skill writes for review.
+  max_message_chars:
+    type: int
+    default: 30000
+    label: Rich Message character limit
+    description: Maximum characters per Telegram proposal message.
+  scan_interval_seconds:
+    type: float
+    default: 2
+    label: Pending scan interval
+    description: Seconds between durable pending-directory scans. Failed deliveries use exponential backoff.
