@@ -1,0 +1,18 @@
+__pycache__/
+.pytest_cache/
+.venv/
+
+# Local secrets and machine-specific configuration
+.env
+.env.*
+!.env.example
+*.local
+*.local.*
+config.local.yaml
+config.local.yml
+settings.local.json
+
+# Hermes runtime state must stay outside source control
+.hermes/
+pending/
+plugin-data/

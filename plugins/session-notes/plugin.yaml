@@ -1,0 +1,6 @@
+name: session-notes
+version: 0.1.0
+requires_hermes: ">=0.22"
+description: "Desktop pane that drafts a summary of the current session and saves it to Notion."
+license: MIT
+tags: [desktop, notion, summary, notes]
