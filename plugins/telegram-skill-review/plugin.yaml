@@ -1,7 +1,9 @@
 name: telegram-skill-review
 version: "0.1.0"
+author: "ZequnZ"
 manifest_version: 2
 api_version: 1
+requires_hermes: ">=0.21.6"
 description: >-
   Sends autonomous pending skill writes to Telegram topics as Rich Messages
   and applies Approve or Reject button decisions without an LLM call.
