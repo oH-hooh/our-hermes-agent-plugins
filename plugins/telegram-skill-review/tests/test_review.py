@@ -1,6 +1,7 @@
 import asyncio
 import importlib.util
 import json
+import re
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -597,3 +598,138 @@ def test_review_ledger_is_private(tmp_path):
 
     assert store.data_dir.stat().st_mode & 0o777 == 0o700
     assert store.ledger_path.stat().st_mode & 0o777 == 0o600
+
+
+class FakeContext:
+    def __init__(self, config: dict, profile_name: str = "default"):
+        self.config = config
+        self.profile_name = profile_name
+        self.platform_handlers = []
+        self.spawned = []
+
+    def get_config(self, key, default=None):
+        return self.config.get(key, default)
+
+    def register_platform_handler(self, platform, factory):
+        self.platform_handlers.append((platform, factory))
+
+    def spawn_task(self, coro, *, name=None):
+        coro.close()
+        self.spawned.append(name)
+
+
+class FakeCallbackQueryHandler:
+    def __init__(self, callback, pattern):
+        self.callback = callback
+        self.pattern = pattern
+
+
+class FakeApplication:
+    def __init__(self):
+        self.bot = FakeBot()
+        self.handlers = []
+
+    def add_handler(self, handler):
+        self.handlers.append(handler)
+
+
+def install_host_stubs(monkeypatch, home: Path, env: dict | None = None):
+    from types import ModuleType
+
+    constants = ModuleType("hermes_constants")
+    constants.get_hermes_home = lambda: home
+    secret_scope = ModuleType("agent.secret_scope")
+
+    class UnscopedSecretError(RuntimeError):
+        pass
+
+    secret_scope.UnscopedSecretError = UnscopedSecretError
+    secret_scope.get_secret_str = lambda name, default="": (env or {}).get(name, default)
+    telegram_ext = ModuleType("telegram.ext")
+    telegram_ext.CallbackQueryHandler = FakeCallbackQueryHandler
+    for name, module in {
+        "hermes_constants": constants,
+        "agent": ModuleType("agent"),
+        "agent.secret_scope": secret_scope,
+        "telegram": ModuleType("telegram"),
+        "telegram.ext": telegram_ext,
+    }.items():
+        monkeypatch.setitem(sys.modules, name, module)
+
+
+def test_register_wires_one_telegram_handler_and_one_scanner_per_profile(tmp_path, monkeypatch):
+    install_host_stubs(monkeypatch, tmp_path)
+    (tmp_path / "profiles" / "worker").mkdir(parents=True)
+    ctx = FakeContext({"chat_id": "17", "source_profiles": ["default", "worker"]})
+
+    plugin.register(ctx)
+    [(platform, factory)] = ctx.platform_handlers
+    application = FakeApplication()
+    factory(application, FakeAdapter())
+
+    assert platform == "telegram"
+    [handler] = application.handlers
+    assert re.fullmatch(handler.pattern, "skillreview:a:worker:abcd1234")
+    assert re.fullmatch(handler.pattern, "skillreview:r:default:abcd1234")
+    assert not re.fullmatch(handler.pattern, "skillreview:a:stranger:abcd1234")
+    assert ctx.spawned == [
+        "telegram-skill-review-scanner:default",
+        "telegram-skill-review-scanner:worker",
+    ]
+
+
+def test_register_routes_a_button_press_to_the_source_profile(tmp_path, monkeypatch):
+    install_host_stubs(monkeypatch, tmp_path)
+    worker_home = tmp_path / "profiles" / "worker"
+    pending_dir = worker_home / "pending" / "skills"
+    pending_dir.mkdir(parents=True)
+    record = pending_record()
+    record["review"] = {
+        "delivery_status": "sent",
+        "chat_id": "17",
+        "thread_id": "29",
+        "content_message_ids": ["41"],
+        "control_message_id": "44",
+    }
+    (pending_dir / "abcd1234.json").write_text(json.dumps(record), encoding="utf-8")
+    ctx = FakeContext({"chat_id": "17", "source_profiles": ["worker"]})
+    plugin.register(ctx)
+    application = FakeApplication()
+    ctx.platform_handlers[0][1](application, FakeAdapter())
+    query = FakeQuery("skillreview:r:worker:abcd1234")
+
+    asyncio.run(application.handlers[0].callback(SimpleNamespace(callback_query=query), None))
+
+    assert not (pending_dir / "abcd1234.json").exists()
+    assert query.answers[0] == "Rejecting proposal…"
+
+
+def test_register_without_chat_id_wires_nothing(tmp_path, monkeypatch):
+    install_host_stubs(monkeypatch, tmp_path)
+    ctx = FakeContext({})
+
+    plugin.register(ctx)
+    application = FakeApplication()
+    ctx.platform_handlers[0][1](application, FakeAdapter())
+
+    assert application.handlers == []
+    assert ctx.spawned == []
+
+
+def test_chat_id_falls_back_to_the_profile_scoped_home_channel(tmp_path, monkeypatch):
+    install_host_stubs(monkeypatch, tmp_path, env={"TELEGRAM_HOME_CHANNEL": " 99 "})
+
+    assert plugin._resolve_chat_id(FakeContext({})) == "99"
+    assert plugin._resolve_chat_id(FakeContext({"chat_id": "17"})) == "17"
+
+
+def test_chat_id_is_empty_when_the_profile_scope_is_unavailable(tmp_path, monkeypatch):
+    install_host_stubs(monkeypatch, tmp_path)
+    secret_scope = sys.modules["agent.secret_scope"]
+
+    def unscoped(name, default=""):
+        raise secret_scope.UnscopedSecretError(name)
+
+    monkeypatch.setattr(secret_scope, "get_secret_str", unscoped)
+
+    assert plugin._resolve_chat_id(FakeContext({})) == ""

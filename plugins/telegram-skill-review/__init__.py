@@ -602,9 +602,20 @@ class TelegramSkillReviewService:
             )
 
 
-def _resolve_chat_id(ctx: Any) -> str:
+def _profile_env(name: str) -> str:
+    """Read a profile-scoped variable through Hermes, never another profile's ``os.environ``."""
+    from agent.secret_scope import UnscopedSecretError, get_secret_str
+
+    try:
+        return get_secret_str(name, "").strip()
+    except UnscopedSecretError:
+        logger.warning("telegram-skill-review could not read %s for this profile; set chat_id instead", name)
+        return ""
+
+
+def _resolve_chat_id(ctx: Any, read_env: Callable[[str], str] = _profile_env) -> str:
     configured = str(ctx.get_config("chat_id", default="") or "").strip()
-    return configured or str(os.getenv("TELEGRAM_HOME_CHANNEL", "")).strip()
+    return configured or read_env("TELEGRAM_HOME_CHANNEL")
 
 
 def source_profile_names(ctx: Any) -> list[str]:
