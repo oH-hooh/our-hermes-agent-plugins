@@ -2,6 +2,8 @@
 
 `telegram-skill-review` sends autonomous Hermes skill proposals to Telegram for delayed human review. Each proposal receives a separate Telegram DM topic containing the complete proposed content, followed by **Approve** and **Reject** buttons.
 
+Nothing is applied without a human tapping **Approve**. The plugin never auto-approves, and no LLM request occurs during delivery, approval, rejection, or status updates.
+
 ## Behavior
 
 1. Hermes stages a skill operation under `<HERMES_HOME>/pending/skills/` when `skills.write_approval` is enabled.
@@ -9,33 +11,43 @@
 3. Every autonomous proposal receives a new Telegram topic.
 4. Each content message identifies the Hermes profile that produced the proposal.
 5. The complete proposal is sent through `sendRichMessage`. Long content is divided among messages in the same topic.
-6. **Approve** calls Hermes `apply_skill_pending()` directly.
-7. **Reject** removes the pending proposal directly.
+6. **Approve** replays the exact staged write through Hermes `apply_skill_pending()`.
+7. **Reject** removes the pending proposal.
 8. The content messages remain in Telegram after either decision.
 9. The plugin removes the buttons, posts the final status, renames the topic, and writes a local review ledger.
 10. One bot-owning profile can review several source profiles. Skill application runs inside the source profile's Hermes home.
 
-No LLM request occurs during delivery, approval, rejection, or status updates.
+## Disclosure
+
+What this plugin does that you should know before installing:
+
+- **Network calls to Telegram.** Proposal content, skill names, and the source profile name are sent to the Telegram Bot API through the bot the Hermes gateway already runs. The plugin stores no credential of its own.
+- **Full skill content leaves the machine.** Every eligible staged skill write is sent in full to the configured Telegram chat and stays in that chat after the decision.
+- **Reads and writes outside its own data.** It reads and updates `pending/skills/*.json` and, on approval, writes skills in each listed source profile's Hermes home, including profiles other than the one it is installed in.
+- **Background task.** While the gateway runs, one scanner per source profile polls the pending directory every `scan_interval_seconds` (default 2 s).
+- **Local ledger.** Decisions are appended to `plugin-data/telegram-skill-review/review-ledger.jsonl` (mode `0600`) with the reviewer's Telegram user ID.
+- **No shell commands, no subprocesses, no telemetry.**
+- **Uses Hermes internals.** Approval calls `tools.skill_manager_tool.apply_skill_pending`, authorization calls the Telegram adapter's callback authorization check, and profile binding uses `hermes_constants.set_hermes_home_override`. These are not yet public plugin APIs, so a future Hermes release may require a plugin update.
 
 ## Requirements
 
-- A Hermes version that provides:
-  - `skills.write_approval`
-  - `tools.write_approval`
-  - `tools.skill_manager_tool.apply_skill_pending`
-  - `ctx.register_platform_handler()`
-  - `ctx.spawn_task()`
-- Telegram configured for the same Hermes profile.
-- Telegram Threaded Mode enabled for the bot through BotFather.
-- A private Telegram chat ID supplied through plugin settings or `TELEGRAM_HOME_CHANNEL`.
+- Hermes Agent `>=0.21.6`, with the gateway running for the profile that owns the Telegram bot.
+- Python 3.11 to 3.14, the same range Hermes supports. No third-party Python dependencies.
+- Telegram configured for that profile, with Threaded Mode enabled for the bot through BotFather.
+- A private Telegram chat ID, supplied through the `chat_id` setting or the profile's `TELEGRAM_HOME_CHANNEL`.
 
 ## Installation
 
-Install the plugin directory using your normal local plugin workflow, enable it for the target profile, and restart that profile's gateway.
+Install and configure the plugin only in the profile that owns the Telegram bot (`<BOT_PROFILE>` below):
 
-Install and configure the plugin only in the profile that owns the Telegram bot. Every listed source profile must enable `skills.write_approval`; source profiles do not need Telegram configuration or their own plugin installation.
+```bash
+hermes -p <BOT_PROFILE> plugins install oH-hooh/our-hermes-agent-plugins/plugins/telegram-skill-review --no-enable
+hermes -p <BOT_PROFILE> plugins enable telegram-skill-review
+```
 
-Configure the profile:
+Every listed source profile must enable `skills.write_approval`. Source profiles do not need Telegram configuration or their own plugin installation.
+
+Configure the bot profile's `config.yaml`:
 
 ```yaml
 skills:
@@ -52,7 +64,13 @@ plugins:
         include_foreground: false
 ```
 
-`chat_id` may be omitted when `TELEGRAM_HOME_CHANNEL` already points to the intended private chat.
+Then restart the gateway:
+
+```bash
+hermes -p <BOT_PROFILE> gateway restart
+```
+
+`chat_id` may be omitted when the bot profile's `TELEGRAM_HOME_CHANNEL` already points to the intended private chat. The fallback is read through Hermes's profile secret scope, so it never picks up another profile's value. When the scope is unavailable, the plugin logs a warning and stays idle until `chat_id` is set.
 
 The bot owner's Telegram authorization governs every listed source profile. Adding a name to `source_profiles` grants the bot's authorized reviewers permission to approve skill changes for that profile. Configuration fails when a listed profile directory does not exist.
 
@@ -68,6 +86,10 @@ A proposal topic contains:
 - one final status message after a decision.
 
 Approval failures preserve the pending record and buttons. A successful decision is recorded before Telegram presentation updates. When Telegram is unavailable, the scanner resumes the missing button, status, and topic updates without applying the skill operation again.
+
+## Unattended runs
+
+Proposals wait for a human indefinitely, but nothing in Hermes waits on them. Staging returns immediately, so background review, cron, and the gateway keep running. A staged write stays pending until someone taps a button or uses `/skills pending`.
 
 ## Persistent files
 
@@ -95,7 +117,7 @@ The pending JSON record stores delivery progress. The scanner resumes after a ga
 
 | Setting | Default | Meaning |
 |---|---:|---|
-| `chat_id` | empty | Target private Telegram chat; falls back to `TELEGRAM_HOME_CHANNEL` |
+| `chat_id` | empty | Target private Telegram chat; falls back to the profile's `TELEGRAM_HOME_CHANNEL` |
 | `source_profiles` | `[]` | Profiles reviewed through this bot; empty selects the plugin's own profile |
 | `include_foreground` | `false` | Include foreground skill operations |
 | `max_message_chars` | `30000` | Character budget for each Rich Message |
@@ -103,14 +125,11 @@ The pending JSON record stores delivery progress. The scanner resumes after a ga
 
 ## Tests
 
-```bash
-uv run --with pytest pytest tests/test_review.py -q
-```
-
 From the repository root:
 
 ```bash
-uv run pytest plugins/telegram-skill-review/tests/test_review.py -q
+uv run pytest plugins/telegram-skill-review/tests -q
+hermes plugins validate plugins/telegram-skill-review
 ```
 
 ## Security properties
@@ -123,3 +142,9 @@ uv run pytest plugins/telegram-skill-review/tests/test_review.py -q
 - Approval binds Hermes path and skill configuration resolution to the source profile.
 - A callback profile, stored profile, chat, or topic mismatch performs no skill mutation.
 - The pending record is retained when application fails.
+
+Report vulnerabilities as described in [SECURITY.md](../../SECURITY.md).
+
+## License
+
+MIT. See [LICENSE](../../LICENSE).

@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    # The plugin uses Hermes internals; catch upstream breakage between releases.
+    - cron: "17 6 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: pytest (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.14"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          python-version: ${{ matrix.python }}
+      - run: uv sync --locked
+      - run: uv run pytest -q
+
+  validate:
+    name: hermes plugins validate (${{ matrix.hermes }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The requires_hermes floor in plugin.yaml, plus the newest stable release.
+        hermes: ["v0.21.6", "latest"]
+        plugin: ["telegram-skill-review"]
+    env:
+      GIT_TERMINAL_PROMPT: "0"
+      HERMES_HOME: ${{ github.workspace }}/.ci-hermes-home
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          python-version: "3.14"
+      - name: Resolve Hermes release
+        id: hermes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED: ${{ matrix.hermes }}
+        run: |
+          set -euo pipefail
+          if [ "$REQUESTED" = latest ]; then
+            tag=$(gh release view --repo NousResearch/hermes-agent --json tagName --jq .tagName)
+          else
+            tag=$REQUESTED
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Hermes $tag"
+      - name: Install Hermes from its own lockfile
+        env:
+          TAG: ${{ steps.hermes.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git clone --quiet --depth 1 --branch "$TAG" https://github.com/NousResearch/hermes-agent.git "$RUNNER_TEMP/hermes"
+          cd "$RUNNER_TEMP/hermes"
+          UV_PROJECT_ENVIRONMENT="$RUNNER_TEMP/hermes-venv" uv sync --frozen --no-install-project --no-dev --python 3.14
+          mkdir -p "$HERMES_HOME"
+      - name: Validate plugin (same check as catalog CI)
+        env:
+          PLUGIN: ${{ matrix.plugin }}
+        run: |
+          PYTHONPATH="$RUNNER_TEMP/hermes" "$RUNNER_TEMP/hermes-venv/bin/python" -m hermes_cli.main \
+            plugins validate "plugins/$PLUGIN" --install-deps </dev/null

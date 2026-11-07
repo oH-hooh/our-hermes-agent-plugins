@@ -8,7 +8,7 @@ description: >-
   Sends autonomous pending skill writes to Telegram topics as Rich Messages
   and applies Approve or Reject button decisions without an LLM call.
 license: MIT
-tags: [telegram, skills, approval, self-learning]
+tags: [telegram, skills-approval]
 config_schema:
   chat_id:
     type: str
